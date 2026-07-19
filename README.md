@@ -302,4 +302,4 @@ SQLite doesn't support multiple databases in the same way MySQL does. The `USE d
 
 ## License
 
-Part of the cloudfunctions-core project.
+[MIT](LICENSE)
