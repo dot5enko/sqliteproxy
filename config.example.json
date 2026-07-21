@@ -3,15 +3,15 @@
     "address": "0.0.0.0",
     "port": 3306
   },
-  "database": {
-    "path": "./data.sqlite",
+  "storage": {
+    "root": "./storage",
     "wal_mode": true,
     "busy_timeout_ms": 5000,
     "max_connections": 10
   },
-  "auth": {
-    "username": "admin",
-    "password": "secret"
+  "management": {
+    "address": "127.0.0.1",
+    "port": 8080
   },
   "logging": {
     "level": "info",

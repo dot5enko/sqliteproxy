@@ -58,9 +58,9 @@ func TestTranslateShowTables(t *testing.T) {
 			expected: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
 		},
 		{
-			name:     "Show databases",
+			name:     "Show databases left for session handler",
 			input:    "SHOW DATABASES",
-			expected: "SELECT 'main' AS Database",
+			expected: "SHOW DATABASES",
 		},
 	}
 
@@ -273,8 +273,8 @@ func TestTranslateUseStatement(t *testing.T) {
 	tr := New()
 
 	result := tr.Translate("USE mydb")
-	if result != "SELECT 1" {
-		t.Errorf("Translate() = %q, want %q", result, "SELECT 1")
+	if result != "USE mydb" {
+		t.Errorf("Translate() = %q, want %q", result, "USE mydb")
 	}
 }
 

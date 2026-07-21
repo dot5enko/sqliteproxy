@@ -57,10 +57,8 @@ func (t *Translator) handleSpecialCommands(sql string) (string, bool) {
 		return "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", true
 	}
 
-	// SHOW DATABASES
-	if upper == "SHOW DATABASES" || upper == "SHOW SCHEMAS" {
-		return "SELECT 'main' AS Database", true
-	}
+	// SHOW DATABASES / SHOW SCHEMAS are handled by the session handler
+	// so each connection only sees its bound database.
 
 	// SHOW CREATE TABLE
 	if strings.HasPrefix(upper, "SHOW CREATE TABLE ") {
@@ -110,10 +108,7 @@ func (t *Translator) handleSpecialCommands(sql string) (string, bool) {
 		return "SELECT 1 LIMIT 0", true
 	}
 
-	// USE database (no-op for SQLite, but don't error)
-	if strings.HasPrefix(upper, "USE ") {
-		return "SELECT 1", true
-	}
+	// USE database is handled by the session handler for binding enforcement.
 
 	// SET statements (pass through or convert)
 	if strings.HasPrefix(upper, "SET ") {

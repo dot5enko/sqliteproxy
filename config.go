@@ -9,31 +9,30 @@ import (
 
 // FileConfig represents the configuration file format
 type FileConfig struct {
-	Server   ServerConfig   `json:"server"`
-	Database DatabaseConfig `json:"database"`
-	Auth     AuthConfig     `json:"auth"`
-	Logging  LoggingConfig  `json:"logging"`
+	Server     ServerConfig     `json:"server"`
+	Storage    StorageConfig    `json:"storage"`
+	Management ManagementConfig `json:"management"`
+	Logging    LoggingConfig    `json:"logging"`
 }
 
-// ServerConfig holds server settings
+// ServerConfig holds MySQL wire-protocol server settings
 type ServerConfig struct {
 	Address string `json:"address"`
 	Port    int    `json:"port"`
 }
 
-// DatabaseConfig holds database settings
-type DatabaseConfig struct {
-	Path         string `json:"path"`
-	WALMode      bool   `json:"wal_mode"`
-	BusyTimeout  int    `json:"busy_timeout_ms"`
-	MaxConns     int    `json:"max_connections"`
+// StorageConfig holds multi-database storage settings
+type StorageConfig struct {
+	Root            string `json:"root"`
+	WALMode         bool   `json:"wal_mode"`
+	BusyTimeout     int    `json:"busy_timeout_ms"`
+	MaxConnections  int    `json:"max_connections"`
 }
 
-// AuthConfig holds authentication settings
-type AuthConfig struct {
-	Username     string `json:"username"`
-	Password     string `json:"password"`
-	PasswordFile string `json:"password_file"`
+// ManagementConfig holds HTTP management API settings
+type ManagementConfig struct {
+	Address string `json:"address"`
+	Port    int    `json:"port"`
 }
 
 // LoggingConfig holds logging settings
@@ -49,15 +48,15 @@ func DefaultFileConfig() FileConfig {
 			Address: "0.0.0.0",
 			Port:    3306,
 		},
-		Database: DatabaseConfig{
-			Path:        "./data.sqlite",
-			WALMode:     true,
-			BusyTimeout: 5000,
-			MaxConns:    10,
+		Storage: StorageConfig{
+			Root:           "./storage",
+			WALMode:        true,
+			BusyTimeout:    5000,
+			MaxConnections: 10,
 		},
-		Auth: AuthConfig{
-			Username: "",
-			Password: "",
+		Management: ManagementConfig{
+			Address: "127.0.0.1",
+			Port:    8080,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -79,43 +78,20 @@ func LoadConfig(path string) (FileConfig, error) {
 		return config, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Handle password file
-	if config.Auth.PasswordFile != "" && config.Auth.Password == "" {
-		password, err := readPasswordFile(config.Auth.PasswordFile)
-		if err != nil {
-			return config, fmt.Errorf("failed to read password file: %w", err)
-		}
-		config.Auth.Password = password
-	}
-
 	return config, nil
-}
-
-// readPasswordFile reads a password from a file
-func readPasswordFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	// Trim whitespace and newlines
-	password := string(data)
-	for len(password) > 0 && (password[len(password)-1] == '\n' || password[len(password)-1] == '\r') {
-		password = password[:len(password)-1]
-	}
-	return password, nil
 }
 
 // ToConfig converts FileConfig to Config
 func (fc FileConfig) ToConfig() Config {
 	return Config{
-		Address:      fc.Server.Address,
-		Port:         fc.Server.Port,
-		DatabasePath: fc.Database.Path,
-		WALMode:      fc.Database.WALMode,
-		BusyTimeout:  time.Duration(fc.Database.BusyTimeout) * time.Millisecond,
-		MaxConns:     fc.Database.MaxConns,
-		Username:     fc.Auth.Username,
-		Password:     fc.Auth.Password,
-		Debug:        fc.Logging.Level == "debug",
+		Address:           fc.Server.Address,
+		Port:              fc.Server.Port,
+		StorageRoot:       fc.Storage.Root,
+		WALMode:           fc.Storage.WALMode,
+		BusyTimeout:       time.Duration(fc.Storage.BusyTimeout) * time.Millisecond,
+		MaxConns:          fc.Storage.MaxConnections,
+		ManagementAddress: fc.Management.Address,
+		ManagementPort:    fc.Management.Port,
+		Debug:             fc.Logging.Level == "debug",
 	}
 }

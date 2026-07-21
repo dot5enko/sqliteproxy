@@ -10,48 +10,80 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
 
+	"github.com/dot5enko/cloudfunctions/packages/sqlite/storage"
 	"github.com/dot5enko/cloudfunctions/packages/sqlite/translator"
 )
 
 // HandlerFactory creates per-session MySQL protocol handlers.
 type HandlerFactory struct {
-	db         *sql.DB
 	translator *translator.Translator
 }
 
 // NewHandlerFactory creates a factory for session-scoped handlers.
-func NewHandlerFactory(db *sql.DB) *HandlerFactory {
+func NewHandlerFactory() *HandlerFactory {
 	return &HandlerFactory{
-		db:         db,
 		translator: translator.New(),
 	}
 }
 
-// NewSessionHandler returns a handler bound to a client session.
-func (f *HandlerFactory) NewSessionHandler(session *Session) *SessionHandler {
+// NewSessionHandler returns a handler bound to a client session and connection binding.
+func (f *HandlerFactory) NewSessionHandler(session *Session, binding *ConnectionBinding) *SessionHandler {
 	return &SessionHandler{
-		db:         f.db,
 		translator: f.translator,
 		session:    session,
+		binding:    binding,
 	}
 }
 
 // SessionHandler implements server.Handler for a single client connection.
 type SessionHandler struct {
-	db         *sql.DB
 	translator *translator.Translator
 	session    *Session
+	binding    *ConnectionBinding
+	db         *storage.Database
+}
+
+// Finalize binds the handler to the authenticated database after handshake.
+func (h *SessionHandler) Finalize(username string) error {
+	db, err := h.binding.Finalize(username)
+	if err != nil {
+		return err
+	}
+	if err := h.session.Bind(db); err != nil {
+		return err
+	}
+	h.db = db
+	return nil
 }
 
 // HandleQuery handles COM_QUERY commands (text protocol).
 func (h *SessionHandler) HandleQuery(query string) (*mysql.Result, error) {
 	fmt.Printf("[DEBUG] Query: %s\n", query)
 
+	if h.db == nil {
+		return nil, errNotBound()
+	}
+
+	trimmed := strings.TrimSpace(query)
+	upper := strings.ToUpper(trimmed)
+
+	if strings.HasPrefix(upper, "USE ") {
+		name := strings.TrimSpace(trimmed[4:])
+		name = strings.Trim(name, "`\"'")
+		if err := h.selectDatabase(name); err != nil {
+			return nil, err
+		}
+		return &mysql.Result{}, nil
+	}
+
+	if upper == "SHOW DATABASES" || upper == "SHOW SCHEMAS" {
+		return h.showDatabases()
+	}
+
 	translated := h.translator.Translate(query)
 	fmt.Printf("[DEBUG] Translated: %s\n", translated)
 
-	upper := strings.ToUpper(strings.TrimSpace(translated))
-
+	upper = strings.ToUpper(strings.TrimSpace(translated))
 	switch upper {
 	case "BEGIN TRANSACTION":
 		return h.handleBegin()
@@ -62,6 +94,28 @@ func (h *SessionHandler) HandleQuery(query string) (*mysql.Result, error) {
 	}
 
 	return h.execute(translated)
+}
+
+func (h *SessionHandler) showDatabases() (*mysql.Result, error) {
+	rs, err := mysql.BuildSimpleResultset([]string{"Database"}, [][]interface{}{
+		{h.db.Name},
+	}, false)
+	if err != nil {
+		return nil, err
+	}
+	return &mysql.Result{Resultset: rs}, nil
+}
+
+func (h *SessionHandler) selectDatabase(name string) error {
+	if h.db == nil {
+		// Pre-auth handshake path
+		return h.binding.SetRequestedDB(name)
+	}
+	if name != h.db.Name {
+		return errDBAccessDenied(name)
+	}
+	h.session.SetDatabase(name)
+	return nil
 }
 
 func (h *SessionHandler) handleBegin() (*mysql.Result, error) {
@@ -108,6 +162,10 @@ func (h *SessionHandler) handleRollback() (*mysql.Result, error) {
 // HandleStmtPrepare handles COM_STMT_PREPARE.
 func (h *SessionHandler) HandleStmtPrepare(query string) (int, int, interface{}, error) {
 	fmt.Printf("[DEBUG] Prepare: %s\n", query)
+
+	if h.db == nil {
+		return 0, 0, nil, errNotBound()
+	}
 
 	translated := h.translator.Translate(query)
 
@@ -195,7 +253,11 @@ func (h *SessionHandler) HandleStmtClose(context interface{}) error {
 func (h *SessionHandler) HandleFieldList(table string, fieldWildcard string) ([]*mysql.Field, error) {
 	fmt.Printf("[DEBUG] FieldList: %s, %s\n", table, fieldWildcard)
 
-	query := fmt.Sprintf("PRAGMA table_info('%s')", table)
+	if h.db == nil {
+		return nil, errNotBound()
+	}
+
+	query := fmt.Sprintf("PRAGMA table_info('%s')", strings.ReplaceAll(table, "'", "''"))
 	rows, err := h.queryRows(query)
 	if err != nil {
 		return nil, err
@@ -226,8 +288,7 @@ func (h *SessionHandler) HandleFieldList(table string, fieldWildcard string) ([]
 // UseDB handles COM_INIT_DB command (database selection).
 func (h *SessionHandler) UseDB(dbName string) error {
 	fmt.Printf("[DEBUG] UseDB: %s\n", dbName)
-	h.session.SetDatabase(dbName)
-	return nil
+	return h.selectDatabase(dbName)
 }
 
 // HandleOtherCommand handles other MySQL commands.
@@ -239,8 +300,11 @@ func (h *SessionHandler) ensureConnection() error {
 	if h.session.GetConnection() != nil {
 		return nil
 	}
+	if h.db == nil {
+		return errNotBound()
+	}
 
-	conn, err := h.db.Conn(context.Background())
+	conn, err := h.db.Pool.DB().Conn(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to acquire session connection: %w", err)
 	}

@@ -6,6 +6,7 @@ require (
 	github.com/go-mysql-org/go-mysql v1.7.0
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.17
+	github.com/oklog/ulid/v2 v2.1.0
 	github.com/peterh/liner v1.2.2
 )
 

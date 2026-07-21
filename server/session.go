@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/dot5enko/cloudfunctions/packages/sqlite/storage"
 )
 
 // Session represents a client connection session
@@ -16,6 +18,9 @@ type Session struct {
 	LastActiveAt time.Time
 	Variables    map[string]string
 
+	// Bound tenant database (immutable after auth)
+	BoundDB *storage.Database
+
 	// Transaction state
 	InTransaction bool
 	Tx            *sql.Tx
@@ -26,16 +31,41 @@ type Session struct {
 	mu sync.RWMutex
 }
 
-// NewSession creates a new session
-func NewSession(id string, username string) *Session {
+// NewSession creates a new unbound session
+func NewSession(id string) *Session {
 	now := time.Now()
 	return &Session{
 		ID:           id,
-		Username:     username,
 		ConnectedAt:  now,
 		LastActiveAt: now,
 		Variables:    make(map[string]string),
 	}
+}
+
+// Bind permanently attaches the session to an authenticated database.
+func (s *Session) Bind(db *storage.Database) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.BoundDB != nil {
+		if s.BoundDB.Name != db.Name {
+			return fmt.Errorf("session already bound to a different database")
+		}
+		return nil
+	}
+
+	s.BoundDB = db
+	s.Username = db.Username
+	s.Database = db.Name
+	s.LastActiveAt = time.Now()
+	return nil
+}
+
+// GetBoundDB returns the authenticated tenant database.
+func (s *Session) GetBoundDB() *storage.Database {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.BoundDB
 }
 
 // SetVariable sets a session variable
@@ -54,7 +84,7 @@ func (s *Session) GetVariable(key string) (string, bool) {
 	return val, ok
 }
 
-// SetDatabase sets the current database
+// SetDatabase sets the current database name label (must match bound DB).
 func (s *Session) SetDatabase(db string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -143,20 +173,24 @@ func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Rollback any active transaction
+	var firstErr error
+
 	if s.Tx != nil {
-		s.Tx.Rollback()
+		if err := s.Tx.Rollback(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		s.Tx = nil
+		s.InTransaction = false
 	}
 
-	// Close per-session connection
 	if s.DB != nil {
-		err := s.DB.Close()
+		if err := s.DB.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		s.DB = nil
-		return err
 	}
 
-	return nil
+	return firstErr
 }
 
 // SessionManager manages active sessions
@@ -172,15 +206,15 @@ func NewSessionManager() *SessionManager {
 	}
 }
 
-// Create creates a new session
-func (sm *SessionManager) Create(id string, username string) *Session {
+// Create creates a new unbound session
+func (sm *SessionManager) Create(id string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	session := NewSession(id, username)
+	session := NewSession(id)
 	sm.sessions[id] = session
 
-	fmt.Printf("[INFO] Session created: %s (user: %s)\n", id, username)
+	fmt.Printf("[INFO] Session created: %s\n", id)
 	return session
 }
 
