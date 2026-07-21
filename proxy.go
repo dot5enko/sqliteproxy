@@ -52,7 +52,7 @@ func DefaultConfig() Config {
 type Proxy struct {
 	config    Config
 	pool      *sqlite.Pool
-	handler   *sqliteServer.SQLiteHandler
+	handlers  *sqliteServer.HandlerFactory
 	sessions  *sqliteServer.SessionManager
 	listener  net.Listener
 	ctx       context.Context
@@ -81,13 +81,12 @@ func New(config Config) (*Proxy, error) {
 	// Create session manager
 	sessions := sqliteServer.NewSessionManager()
 
-	// Create handler (with session manager for transaction support)
-	handler := sqliteServer.NewSQLiteHandler(pool.DB(), config.Username, config.Password, sessions)
+	handlers := sqliteServer.NewHandlerFactory(pool.DB())
 
 	return &Proxy{
 		config:   config,
 		pool:     pool,
-		handler:  handler,
+		handlers: handlers,
 		sessions: sessions,
 		ctx:      ctx,
 		cancel:   cancel,
@@ -137,23 +136,22 @@ func (p *Proxy) acceptConnections() {
 func (p *Proxy) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// Create MySQL server connection
-	// This handles the MySQL handshake and authentication
+	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
+	session := p.sessions.Create(sessionID, p.config.Username)
+	defer p.sessions.Remove(sessionID)
+
+	handler := p.handlers.NewSessionHandler(session)
+
 	mysqlConn, err := server.NewConn(
 		conn,
 		p.config.Username,
 		p.config.Password,
-		p.handler,
+		handler,
 	)
 	if err != nil {
 		fmt.Printf("[ERROR] Failed to create connection: %v\n", err)
 		return
 	}
-
-	// Create session
-	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
-	session := p.sessions.Create(sessionID, p.config.Username)
-	defer p.sessions.Remove(sessionID)
 
 	fmt.Printf("[INFO] Client connected: %s (session: %s)\n", conn.RemoteAddr(), sessionID)
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -12,110 +13,115 @@ import (
 	"github.com/dot5enko/cloudfunctions/packages/sqlite/translator"
 )
 
-// SQLiteHandler implements the MySQL server handler interface
-type SQLiteHandler struct {
+// HandlerFactory creates per-session MySQL protocol handlers.
+type HandlerFactory struct {
 	db         *sql.DB
 	translator *translator.Translator
-	user       string
-	password   string
-	sessions   *SessionManager
 }
 
-// NewSQLiteHandler creates a new SQLite handler
-func NewSQLiteHandler(db *sql.DB, user, password string, sessions *SessionManager) *SQLiteHandler {
-	return &SQLiteHandler{
+// NewHandlerFactory creates a factory for session-scoped handlers.
+func NewHandlerFactory(db *sql.DB) *HandlerFactory {
+	return &HandlerFactory{
 		db:         db,
 		translator: translator.New(),
-		user:       user,
-		password:   password,
-		sessions:   sessions,
 	}
 }
 
-// NewConnection is called when a new client connects
-func (h *SQLiteHandler) NewConnection(c *server.Conn) {
-	fmt.Printf("[INFO] New connection from %s\n", c.RemoteAddr())
+// NewSessionHandler returns a handler bound to a client session.
+func (f *HandlerFactory) NewSessionHandler(session *Session) *SessionHandler {
+	return &SessionHandler{
+		db:         f.db,
+		translator: f.translator,
+		session:    session,
+	}
 }
 
-// ConnectionClosed is called when a client disconnects
-func (h *SQLiteHandler) ConnectionClosed(c *server.Conn) {
-	fmt.Printf("[INFO] Connection closed: %s\n", c.RemoteAddr())
+// SessionHandler implements server.Handler for a single client connection.
+type SessionHandler struct {
+	db         *sql.DB
+	translator *translator.Translator
+	session    *Session
 }
 
-// getSessionFromConn extracts session from connection (stored via context)
-func (h *SQLiteHandler) getSessionFromConn(c *server.Conn) *Session {
-	// For now, we'll use a workaround - the session is stored in the handler
-	// In a real implementation, we'd store it in the connection context
-	return nil
-}
-
-// HandleQuery handles COM_QUERY commands (text protocol)
-func (h *SQLiteHandler) HandleQuery(query string) (*mysql.Result, error) {
+// HandleQuery handles COM_QUERY commands (text protocol).
+func (h *SessionHandler) HandleQuery(query string) (*mysql.Result, error) {
 	fmt.Printf("[DEBUG] Query: %s\n", query)
 
-	// Translate MySQL SQL to SQLite
 	translated := h.translator.Translate(query)
 	fmt.Printf("[DEBUG] Translated: %s\n", translated)
 
-	// Check for transaction commands
 	upper := strings.ToUpper(strings.TrimSpace(translated))
 
-	// Handle BEGIN TRANSACTION
-	if upper == "BEGIN TRANSACTION" {
-		return h.handleBegin(query)
+	switch upper {
+	case "BEGIN TRANSACTION":
+		return h.handleBegin()
+	case "COMMIT":
+		return h.handleCommit()
+	case "ROLLBACK":
+		return h.handleRollback()
 	}
 
-	// Handle COMMIT
-	if upper == "COMMIT" {
-		return h.handleCommit(query)
-	}
-
-	// Handle ROLLBACK
-	if upper == "ROLLBACK" {
-		return h.handleRollback(query)
-	}
-
-	// Execute the translated query
 	return h.execute(translated)
 }
 
-// handleBegin starts a transaction
-func (h *SQLiteHandler) handleBegin(query string) (*mysql.Result, error) {
-	// For now, we'll use a simple approach without per-session connections
-	// The transaction will be handled at the connection level
-	fmt.Printf("[DEBUG] Transaction started\n")
+func (h *SessionHandler) handleBegin() (*mysql.Result, error) {
+	if h.session.IsInTransaction() {
+		return nil, fmt.Errorf("transaction already in progress")
+	}
+
+	if err := h.ensureConnection(); err != nil {
+		return nil, err
+	}
+
+	tx, err := h.session.GetConnection().BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	h.session.BeginTransaction(tx)
+	fmt.Printf("[DEBUG] Transaction started (session: %s)\n", h.session.ID)
 	return &mysql.Result{}, nil
 }
 
-// handleCommit commits the current transaction
-func (h *SQLiteHandler) handleCommit(query string) (*mysql.Result, error) {
-	fmt.Printf("[DEBUG] Transaction committed\n")
+func (h *SessionHandler) handleCommit() (*mysql.Result, error) {
+	if err := h.session.CommitTransaction(); err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("[DEBUG] Transaction committed (session: %s)\n", h.session.ID)
 	return &mysql.Result{}, nil
 }
 
-// handleRollback rolls back the current transaction
-func (h *SQLiteHandler) handleRollback(query string) (*mysql.Result, error) {
-	fmt.Printf("[DEBUG] Transaction rolled back\n")
+func (h *SessionHandler) handleRollback() (*mysql.Result, error) {
+	if !h.session.IsInTransaction() {
+		return &mysql.Result{}, nil
+	}
+
+	if err := h.session.RollbackTransaction(); err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("[DEBUG] Transaction rolled back (session: %s)\n", h.session.ID)
 	return &mysql.Result{}, nil
 }
 
-// HandleStmtPrepare handles COM_STMT_PREPARE
-func (h *SQLiteHandler) HandleStmtPrepare(query string) (int, int, interface{}, error) {
+// HandleStmtPrepare handles COM_STMT_PREPARE.
+func (h *SessionHandler) HandleStmtPrepare(query string) (int, int, interface{}, error) {
 	fmt.Printf("[DEBUG] Prepare: %s\n", query)
 
-	// Translate the query
 	translated := h.translator.Translate(query)
 
-	// Prepare the statement
-	stmt, err := h.db.Prepare(translated)
+	if err := h.ensureConnection(); err != nil {
+		return 0, 0, nil, err
+	}
+
+	stmt, err := h.prepare(translated)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 
-	// Count parameters
 	paramCount := strings.Count(translated, "?")
 
-	// For SELECT queries, we need to return column count
 	columnCount := 0
 	upper := strings.ToUpper(strings.TrimSpace(query))
 	if strings.HasPrefix(upper, "SELECT") ||
@@ -134,8 +140,8 @@ func (h *SQLiteHandler) HandleStmtPrepare(query string) (int, int, interface{}, 
 	return paramCount, columnCount, stmt, nil
 }
 
-// HandleStmtExecute handles COM_STMT_EXECUTE
-func (h *SQLiteHandler) HandleStmtExecute(context interface{}, query string, args []interface{}) (*mysql.Result, error) {
+// HandleStmtExecute handles COM_STMT_EXECUTE.
+func (h *SessionHandler) HandleStmtExecute(context interface{}, query string, args []interface{}) (*mysql.Result, error) {
 	stmt, ok := context.(*sql.Stmt)
 	if !ok {
 		return nil, fmt.Errorf("invalid prepared statement context")
@@ -153,7 +159,7 @@ func (h *SQLiteHandler) HandleStmtExecute(context interface{}, query string, arg
 		}
 		defer rows.Close()
 
-		resultset, err := h.buildResultset(rows)
+		resultset, err := buildResultset(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -177,20 +183,20 @@ func (h *SQLiteHandler) HandleStmtExecute(context interface{}, query string, arg
 	}, nil
 }
 
-// HandleStmtClose handles COM_STMT_CLOSE
-func (h *SQLiteHandler) HandleStmtClose(context interface{}) error {
+// HandleStmtClose handles COM_STMT_CLOSE.
+func (h *SessionHandler) HandleStmtClose(context interface{}) error {
 	if stmt, ok := context.(*sql.Stmt); ok {
 		return stmt.Close()
 	}
 	return nil
 }
 
-// HandleFieldList handles COM_FIELD_LIST command
-func (h *SQLiteHandler) HandleFieldList(table string, fieldWildcard string) ([]*mysql.Field, error) {
+// HandleFieldList handles COM_FIELD_LIST command.
+func (h *SessionHandler) HandleFieldList(table string, fieldWildcard string) ([]*mysql.Field, error) {
 	fmt.Printf("[DEBUG] FieldList: %s, %s\n", table, fieldWildcard)
 
 	query := fmt.Sprintf("PRAGMA table_info('%s')", table)
-	rows, err := h.db.Query(query)
+	rows, err := h.queryRows(query)
 	if err != nil {
 		return nil, err
 	}
@@ -208,30 +214,54 @@ func (h *SQLiteHandler) HandleFieldList(table string, fieldWildcard string) ([]*
 			return nil, err
 		}
 
-		field := &mysql.Field{
+		fields = append(fields, &mysql.Field{
 			Name: []byte(name),
 			Type: mysql.MYSQL_TYPE_STRING,
-		}
-
-		fields = append(fields, field)
+		})
 	}
 
 	return fields, nil
 }
 
-// UseDB handles COM_INIT_DB command (database selection)
-func (h *SQLiteHandler) UseDB(dbName string) error {
+// UseDB handles COM_INIT_DB command (database selection).
+func (h *SessionHandler) UseDB(dbName string) error {
 	fmt.Printf("[DEBUG] UseDB: %s\n", dbName)
+	h.session.SetDatabase(dbName)
 	return nil
 }
 
-// HandleOtherCommand handles other MySQL commands
-func (h *SQLiteHandler) HandleOtherCommand(cmd byte, data []byte) error {
+// HandleOtherCommand handles other MySQL commands.
+func (h *SessionHandler) HandleOtherCommand(cmd byte, data []byte) error {
 	return mysql.NewError(mysql.ER_UNKNOWN_ERROR, fmt.Sprintf("command %d not supported", cmd))
 }
 
-// execute runs a SQL query and returns the result
-func (h *SQLiteHandler) execute(query string) (*mysql.Result, error) {
+func (h *SessionHandler) ensureConnection() error {
+	if h.session.GetConnection() != nil {
+		return nil
+	}
+
+	conn, err := h.db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to acquire session connection: %w", err)
+	}
+
+	h.session.SetConnection(conn)
+	return nil
+}
+
+func (h *SessionHandler) prepare(query string) (*sql.Stmt, error) {
+	if tx := h.session.GetTransaction(); tx != nil {
+		return tx.Prepare(query)
+	}
+
+	if err := h.ensureConnection(); err != nil {
+		return nil, err
+	}
+
+	return h.session.GetConnection().PrepareContext(context.Background(), query)
+}
+
+func (h *SessionHandler) execute(query string) (*mysql.Result, error) {
 	upper := strings.ToUpper(strings.TrimSpace(query))
 
 	if strings.HasPrefix(upper, "SELECT") ||
@@ -246,15 +276,14 @@ func (h *SQLiteHandler) execute(query string) (*mysql.Result, error) {
 	return h.exec(query)
 }
 
-// query handles SELECT-like statements that return rows
-func (h *SQLiteHandler) query(query string) (*mysql.Result, error) {
-	rows, err := h.db.Query(query)
+func (h *SessionHandler) query(query string) (*mysql.Result, error) {
+	rows, err := h.queryRows(query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	resultset, err := h.buildResultset(rows)
+	resultset, err := buildResultset(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -264,9 +293,8 @@ func (h *SQLiteHandler) query(query string) (*mysql.Result, error) {
 	}, nil
 }
 
-// exec handles statements that don't return rows
-func (h *SQLiteHandler) exec(query string) (*mysql.Result, error) {
-	result, err := h.db.Exec(query)
+func (h *SessionHandler) exec(query string) (*mysql.Result, error) {
+	result, err := h.execResult(query)
 	if err != nil {
 		return nil, err
 	}
@@ -280,8 +308,33 @@ func (h *SQLiteHandler) exec(query string) (*mysql.Result, error) {
 	}, nil
 }
 
-// buildResultset converts sql.Rows to mysql.Resultset
-func (h *SQLiteHandler) buildResultset(rows *sql.Rows) (*mysql.Resultset, error) {
+func (h *SessionHandler) queryRows(query string) (*sql.Rows, error) {
+	if err := h.ensureConnection(); err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	if tx := h.session.GetTransaction(); tx != nil {
+		return tx.QueryContext(ctx, query)
+	}
+
+	return h.session.GetConnection().QueryContext(ctx, query)
+}
+
+func (h *SessionHandler) execResult(query string) (sql.Result, error) {
+	if err := h.ensureConnection(); err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	if tx := h.session.GetTransaction(); tx != nil {
+		return tx.ExecContext(ctx, query)
+	}
+
+	return h.session.GetConnection().ExecContext(ctx, query)
+}
+
+func buildResultset(rows *sql.Rows) (*mysql.Resultset, error) {
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err
@@ -325,3 +378,6 @@ func (h *SQLiteHandler) buildResultset(rows *sql.Rows) (*mysql.Resultset, error)
 
 	return mysql.BuildSimpleResultset(columns, resultRows, false)
 }
+
+// Ensure SessionHandler implements server.Handler.
+var _ server.Handler = (*SessionHandler)(nil)

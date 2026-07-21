@@ -174,6 +174,178 @@ func TestIntegration(t *testing.T) {
 	fmt.Println("All integration tests passed!")
 }
 
+func TestTransactionIsolation(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.sqlite")
+
+	config := sqlite.DefaultConfig()
+	config.DatabasePath = dbPath
+	config.Port = 13307
+	config.Username = "testuser"
+	config.Password = "testpass"
+
+	proxy, err := sqlite.New(config)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+
+	if err := proxy.Start(); err != nil {
+		t.Fatalf("Failed to start proxy: %v", err)
+	}
+	defer proxy.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	dsn := fmt.Sprintf("testuser:testpass@tcp(127.0.0.1:%d)/?interpolateParams=true", config.Port)
+	openConn := func() *sql.DB {
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
+		if err := db.Ping(); err != nil {
+			t.Fatalf("Failed to ping: %v", err)
+		}
+		return db
+	}
+
+	dbA := openConn()
+	defer dbA.Close()
+	dbB := openConn()
+	defer dbB.Close()
+
+	_, err = dbA.Exec(`
+		CREATE TABLE IF NOT EXISTS tx_users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+
+	tx, err := dbA.Begin()
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
+
+	_, err = tx.Exec("INSERT INTO tx_users (name) VALUES (?)", "Alice")
+	if err != nil {
+		t.Fatalf("Failed to insert in transaction: %v", err)
+	}
+
+	var count int
+	err = tx.QueryRow("SELECT COUNT(*) FROM tx_users WHERE name = ?", "Alice").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to query within transaction: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected same transaction to see 1 row, got %d", count)
+	}
+
+	err = dbB.QueryRow("SELECT COUNT(*) FROM tx_users WHERE name = ?", "Alice").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to query from other connection: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("Expected other connection to see 0 rows before commit, got %d", count)
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit transaction: %v", err)
+	}
+
+	err = dbB.QueryRow("SELECT COUNT(*) FROM tx_users WHERE name = ?", "Alice").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to query after commit: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected other connection to see 1 row after commit, got %d", count)
+	}
+}
+
+func TestTransactionRollback(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.sqlite")
+
+	config := sqlite.DefaultConfig()
+	config.DatabasePath = dbPath
+	config.Port = 13308
+	config.Username = "testuser"
+	config.Password = "testpass"
+
+	proxy, err := sqlite.New(config)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+
+	if err := proxy.Start(); err != nil {
+		t.Fatalf("Failed to start proxy: %v", err)
+	}
+	defer proxy.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	dsn := fmt.Sprintf("testuser:testpass@tcp(127.0.0.1:%d)/?interpolateParams=true", config.Port)
+	dbA, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer dbA.Close()
+
+	dbB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer dbB.Close()
+
+	for _, db := range []*sql.DB{dbA, dbB} {
+		if err := db.Ping(); err != nil {
+			t.Fatalf("Failed to ping: %v", err)
+		}
+	}
+
+	_, err = dbA.Exec(`
+		CREATE TABLE IF NOT EXISTS tx_users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+
+	tx, err := dbA.Begin()
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
+
+	_, err = tx.Exec("INSERT INTO tx_users (name) VALUES (?)", "Bob")
+	if err != nil {
+		t.Fatalf("Failed to insert in transaction: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Failed to rollback transaction: %v", err)
+	}
+
+	var count int
+	err = dbA.QueryRow("SELECT COUNT(*) FROM tx_users WHERE name = ?", "Bob").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to query after rollback: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("Expected rolled-back insert to be invisible, got %d rows", count)
+	}
+
+	err = dbB.QueryRow("SELECT COUNT(*) FROM tx_users WHERE name = ?", "Bob").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to query from other connection: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("Expected other connection to see 0 rows after rollback, got %d", count)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
