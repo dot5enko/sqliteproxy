@@ -26,7 +26,7 @@ go build -o bin/sqlite-client ./cmd/sqlite-client
 ### Run
 
 ```bash
-./bin/sqlite-proxy -storage ./storage -port 3306 -management-port 8080
+./bin/sqlite-proxy -storage ./data -port 3306 -management-port 8080
 ```
 
 Or with a config file:
@@ -138,14 +138,14 @@ sqlite> quit
 ## Storage layout
 
 ```text
-./storage/
+./data/
 ├── management.db              # authoritative catalog + credentials
 ├── db_<ulid>.sqlite           # tenant database
 ├── db_<ulid>.sqlite-wal
 └── db_<ulid>.sqlite-shm
 ```
 
-`management.db` is the sole source of truth. There are no per-database JSON files. Mount `./storage` as a single Docker volume.
+`management.db` is the sole source of truth. There are no per-database JSON files. Mount `./data` as a single Docker volume.
 
 ## Management API
 
@@ -178,7 +178,7 @@ This is process-local logical isolation, not OS sandboxing.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-storage` | `./storage` | Storage root |
+| `-storage` | `./data` | Storage root |
 | `-address` | `0.0.0.0` | MySQL listen address |
 | `-port` | `3306` | MySQL listen port |
 | `-management-address` | `127.0.0.1` | Management HTTP address |
@@ -212,12 +212,6 @@ Constraints:
 
 MySQL dialect is translated to SQLite (types, `AUTO_INCREMENT`, `SHOW TABLES`, `DESCRIBE`, common functions, transactions). Gaps remain for stored procedures, full-text search, and many JSON helpers. Prefer the text protocol (`interpolateParams=true`).
 
-## Development
-
-```bash
-go test ./...
-go test -race ./...
-```
 
 ## License
 

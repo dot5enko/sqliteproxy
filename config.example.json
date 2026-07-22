@@ -4,7 +4,7 @@
     "port": 3306
   },
   "storage": {
-    "root": "./storage",
+    "root": "./data",
     "wal_mode": true,
     "busy_timeout_ms": 5000,
     "max_connections": 10

@@ -14,7 +14,7 @@ func main() {
 	var (
 		address     = flag.String("address", "0.0.0.0", "MySQL wire-protocol listen address")
 		port        = flag.Int("port", 3306, "MySQL wire-protocol listen port")
-		storageRoot = flag.String("storage", "./storage", "Storage root for managed databases")
+		storageRoot = flag.String("storage", "./data", "Storage root for managed databases")
 		mgmtAddress = flag.String("management-address", "127.0.0.1", "Management HTTP listen address")
 		mgmtPort    = flag.Int("management-port", 8080, "Management HTTP listen port")
 		walMode     = flag.Bool("wal", true, "Enable WAL mode for tenant databases")
@@ -29,7 +29,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -storage ./storage -port 3306\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -storage ./data -port 3306\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -config sqlite-proxy.json\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nCreate a database:\n")
 		fmt.Fprintf(os.Stderr, "  curl -sX POST http://127.0.0.1:8080/v1/databases -d '{\"label\":\"orders\"}'\n")

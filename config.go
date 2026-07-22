@@ -23,10 +23,10 @@ type ServerConfig struct {
 
 // StorageConfig holds multi-database storage settings
 type StorageConfig struct {
-	Root            string `json:"root"`
-	WALMode         bool   `json:"wal_mode"`
-	BusyTimeout     int    `json:"busy_timeout_ms"`
-	MaxConnections  int    `json:"max_connections"`
+	Root           string `json:"root"`
+	WALMode        bool   `json:"wal_mode"`
+	BusyTimeout    int    `json:"busy_timeout_ms"`
+	MaxConnections int    `json:"max_connections"`
 }
 
 // ManagementConfig holds HTTP management API settings
@@ -49,7 +49,7 @@ func DefaultFileConfig() FileConfig {
 			Port:    3306,
 		},
 		Storage: StorageConfig{
-			Root:           "./storage",
+			Root:           "./data",
 			WALMode:        true,
 			BusyTimeout:    5000,
 			MaxConnections: 10,

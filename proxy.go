@@ -41,7 +41,7 @@ func DefaultConfig() Config {
 	return Config{
 		Address:           "0.0.0.0",
 		Port:              3306,
-		StorageRoot:       "./storage",
+		StorageRoot:       "./data",
 		WALMode:           true,
 		BusyTimeout:       5 * time.Second,
 		MaxConns:          10,
