@@ -13,7 +13,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	sqlitepkg "github.com/dot5enko/cloudfunctions/packages/sqlite/sqlite"
+	sqlitepkg "github.com/dot5enko/sqliteproxy/sqlite"
 )
 
 var (

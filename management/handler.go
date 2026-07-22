@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dot5enko/cloudfunctions/packages/sqlite/storage"
+	storage "github.com/dot5enko/sqliteproxy/storage"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB

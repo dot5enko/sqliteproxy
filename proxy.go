@@ -11,9 +11,9 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/server"
 
-	"github.com/dot5enko/cloudfunctions/packages/sqlite/management"
-	sqliteServer "github.com/dot5enko/cloudfunctions/packages/sqlite/server"
-	"github.com/dot5enko/cloudfunctions/packages/sqlite/storage"
+	management "github.com/dot5enko/sqliteproxy/management"
+	sqliteServer "github.com/dot5enko/sqliteproxy/server"
+	storage "github.com/dot5enko/sqliteproxy/storage"
 )
 
 // Config holds the proxy configuration

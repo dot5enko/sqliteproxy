@@ -10,8 +10,8 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
 
-	"github.com/dot5enko/cloudfunctions/packages/sqlite/storage"
-	"github.com/dot5enko/cloudfunctions/packages/sqlite/translator"
+	storage "github.com/dot5enko/sqliteproxy/storage"
+	translator "github.com/dot5enko/sqliteproxy/translator"
 )
 
 // HandlerFactory creates per-session MySQL protocol handlers.

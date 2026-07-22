@@ -7,20 +7,20 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/dot5enko/cloudfunctions/packages/sqlite"
+	sqlite "github.com/dot5enko/sqliteproxy"
 )
 
 func main() {
 	var (
-		address        = flag.String("address", "0.0.0.0", "MySQL wire-protocol listen address")
-		port           = flag.Int("port", 3306, "MySQL wire-protocol listen port")
-		storageRoot    = flag.String("storage", "./storage", "Storage root for managed databases")
-		mgmtAddress    = flag.String("management-address", "127.0.0.1", "Management HTTP listen address")
-		mgmtPort       = flag.Int("management-port", 8080, "Management HTTP listen port")
-		walMode        = flag.Bool("wal", true, "Enable WAL mode for tenant databases")
-		maxConns       = flag.Int("max-conns", 10, "Maximum connections per tenant database")
-		debug          = flag.Bool("debug", false, "Enable debug logging")
-		configFile     = flag.String("config", "", "Path to configuration file (JSON)")
+		address     = flag.String("address", "0.0.0.0", "MySQL wire-protocol listen address")
+		port        = flag.Int("port", 3306, "MySQL wire-protocol listen port")
+		storageRoot = flag.String("storage", "./storage", "Storage root for managed databases")
+		mgmtAddress = flag.String("management-address", "127.0.0.1", "Management HTTP listen address")
+		mgmtPort    = flag.Int("management-port", 8080, "Management HTTP listen port")
+		walMode     = flag.Bool("wal", true, "Enable WAL mode for tenant databases")
+		maxConns    = flag.Int("max-conns", 10, "Maximum connections per tenant database")
+		debug       = flag.Bool("debug", false, "Enable debug logging")
+		configFile  = flag.String("config", "", "Path to configuration file (JSON)")
 	)
 
 	flag.Usage = func() {

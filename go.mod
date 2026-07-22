@@ -1,4 +1,4 @@
-module github.com/dot5enko/cloudfunctions/packages/sqlite
+module github.com/dot5enko/sqliteproxy
 
 go 1.21
 

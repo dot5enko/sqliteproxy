@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dot5enko/cloudfunctions/packages/sqlite/storage"
+	"github.com/dot5enko/sqliteproxy/storage"
 )
 
 // Session represents a client connection session

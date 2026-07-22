@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/server"
 
-	"github.com/dot5enko/cloudfunctions/packages/sqlite/storage"
+	storage "github.com/dot5enko/sqliteproxy/storage"
 )
 
 // ConnectionBinding tracks handshake state for one MySQL connection.
