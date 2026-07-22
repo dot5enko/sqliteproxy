@@ -2,6 +2,19 @@
 
 A multi-tenant MySQL-compatible SQLite service. Provision databases over HTTP, then connect with any MySQL client using generated credentials. Each database is an isolated SQLite file under a single storage volume.
 
+## Why?
+
+Go binaries using SQLite require CGO because the `mattn/go-sqlite3` driver is a CGO wrapper around the C SQLite library. This proxy moves the CGO dependency into a separate process, allowing your main binary to remain pure Go while still using SQLite through a standard MySQL client.
+
+```
+┌─────────────────┐         ┌──────────────────────────┐         ┌─────────────┐
+│   Go Binary     │  TCP    │   sqlite-wire-proxy      │  CGO    │   SQLite    │
+│  (no CGO)       │────────▶│   (MySQL protocol :3306) │────────▶│   .db file  │
+│  go-sql-driver  │         │   + SQL translator       │         │             │
+│  /mysql         │         │   + Auth / Sessions      │         │             │
+└─────────────────┘         └──────────────────────────┘         └─────────────┘
+```
+
 ## Features
 
 - **Multi-database storage** — one process exposes many tenant SQLite files
@@ -135,6 +148,136 @@ sqlite> SELECT * FROM users;
 sqlite> quit
 ```
 
+## Architecture
+
+```
+├── cmd/
+│   ├── sqlite-proxy/         # CLI binary entrypoint
+│   │   └── main.go
+│   └── sqlite-client/        # Interactive MySQL client
+│       └── main.go
+├── server/                   # MySQL wire protocol handling
+│   ├── handler.go            # Query execution & result building
+│   ├── auth.go               # Authentication provider
+│   ├── session.go            # Connection session management
+│   └── errors.go             # Error code mapping
+├── sqlite/                   # SQLite database layer
+│   └── pool.go               # WAL-mode connection pool
+├── storage/                  # Multi-tenant storage
+│   ├── store.go              # Management DB catalog
+│   └── database.go           # Per-tenant database lifecycle
+├── management/               # HTTP management API
+│   └── handler.go            # CRUD for tenant databases
+├── translator/               # SQL dialect translation
+│   └── translator.go         # MySQL → SQLite SQL rewriter
+├── config.go                 # Configuration structs
+└── proxy.go                  # Main orchestrator
+```
+
+### Components
+
+| Component | Responsibility |
+|-----------|---------------|
+| **proxy.go** | Wires everything together: listener, handler, pool |
+| **server/handler.go** | Implements `go-mysql-org/go-mysql/server.Handler`. Receives MySQL commands, translates SQL, executes on SQLite, returns MySQL-formatted results |
+| **server/auth.go** | Validates username/password credentials using MySQL's `mysql_native_password` authentication |
+| **server/session.go** | Tracks active connections, session variables, and handles cleanup |
+| **storage/store.go** | Manages the `management.db` catalog — authoritative source of database names, labels, and credentials |
+| **storage/database.go** | Per-tenant database lifecycle: creates SQLite files, manages `sql.DB` pools, enforces isolation |
+| **sqlite/pool.go** | Manages SQLite connections with WAL journal mode for concurrent reads |
+| **management/handler.go** | HTTP API for `POST / GET /v1/databases` |
+| **translator/translator.go** | Rewrites MySQL SQL syntax to SQLite-compatible SQL |
+
+## SQL Translation
+
+The translator converts MySQL-specific SQL to SQLite equivalents:
+
+### DDL (Schema)
+
+| MySQL | SQLite |
+|-------|--------|
+| `INT AUTO_INCREMENT` | `INTEGER` (implicit ROWID) |
+| `VARCHAR(n)` | `TEXT` |
+| `DATETIME` | `TEXT` |
+| `BOOLEAN` | `INTEGER` |
+| `ENGINE=InnoDB` | Removed |
+| `DEFAULT CHARSET=utf8mb4` | Removed |
+
+### DML (Queries)
+
+| MySQL | SQLite |
+|-------|--------|
+| `LIMIT offset, count` | `LIMIT count OFFSET offset` |
+| `NOW()` | `datetime('now')` |
+| `CURDATE()` | `date('now')` |
+| `UNIX_TIMESTAMP()` | `strftime('%s','now')` |
+| `TRUE` / `FALSE` | `1` / `0` |
+| Backticks `` ` `` | Double quotes `"` |
+
+### Meta Commands
+
+| MySQL | SQLite |
+|-------|--------|
+| `SHOW TABLES` | `SELECT name FROM sqlite_master WHERE type='table'` |
+| `SHOW DATABASES` | `SELECT 'main' AS Database` |
+| `DESCRIBE table` | `PRAGMA table_info(table)` |
+| `SET NAMES utf8mb4` | `SELECT 1` (no-op) |
+| `USE database` | `SELECT 1` (no-op) |
+
+## SQLite Features
+
+### WAL Mode
+
+The proxy enables WAL (Write-Ahead Logging) mode by default, which allows:
+- Multiple concurrent readers
+- One writer (non-blocking reads during writes)
+- Better performance for concurrent workloads
+
+### Connection Pool
+
+Configurable connection pool manages concurrent access:
+- `max_connections`: Maximum open connections (default 10)
+- Connections are reused automatically
+- Busy timeout prevents lock contention errors
+
+### Transaction Support
+
+The proxy translates MySQL transaction commands to SQLite:
+
+| MySQL | SQLite |
+|-------|--------|
+| `START TRANSACTION` | `BEGIN TRANSACTION` |
+| `BEGIN` | `BEGIN TRANSACTION` |
+| `COMMIT` | `COMMIT` |
+| `ROLLBACK` | `ROLLBACK` |
+| `SAVEPOINT name` | `SAVEPOINT name` (native) |
+| `RELEASE SAVEPOINT name` | `RELEASE SAVEPOINT name` (native) |
+| `ROLLBACK TO SAVEPOINT name` | `ROLLBACK TO SAVEPOINT name` (native) |
+
+Example:
+```sql
+START TRANSACTION;
+INSERT INTO users (name) VALUES ('Alice');
+INSERT INTO users (name) VALUES ('Bob');
+COMMIT;
+
+-- Or with savepoints
+START TRANSACTION;
+INSERT INTO users (name) VALUES ('Charlie');
+SAVEPOINT sp1;
+INSERT INTO users (name) VALUES ('David');
+ROLLBACK TO SAVEPOINT sp1; -- David is undone, Charlie remains
+COMMIT;
+```
+
+### Session Coherency
+
+Each client connection maintains its own session state:
+- Session variables are tracked per connection
+- Transaction state is maintained per session
+- Database context (`USE database`) is tracked per session
+- Session cleanup happens automatically on disconnect
+
 ## Storage layout
 
 ```text
@@ -188,8 +331,6 @@ This is process-local logical isolation, not OS sandboxing.
 | `-config` | | JSON config file |
 | `-debug` | `false` | Debug logging |
 
-The old single-file `-db` / `-user` / `-password` flags have been removed.
-
 ### Config file
 
 See [`config.example.json`](config.example.json).
@@ -208,10 +349,37 @@ Constraints:
 - Back up `management.db` and all `db_*.sqlite` (+ WAL/SHM) together
 - Keep the management API private
 
-## SQL compatibility
+## Limitations
 
-MySQL dialect is translated to SQLite (types, `AUTO_INCREMENT`, `SHOW TABLES`, `DESCRIBE`, common functions, transactions). Gaps remain for stored procedures, full-text search, and many JSON helpers. Prefer the text protocol (`interpolateParams=true`).
+### Prepared Statements
 
+The proxy has limited support for MySQL prepared statements. Use `interpolateParams=true` in your Go DSN to use the text protocol instead:
+
+```go
+db, _ := sql.Open("mysql", "user:pass@tcp(host:3306)/db?interpolateParams=true")
+```
+
+### SQL Compatibility
+
+Not all MySQL features are supported. The translator handles common CRUD operations and GORM-generated queries. Unsupported features:
+- Stored procedures
+- Triggers (MySQL syntax)
+- `ON DUPLICATE KEY UPDATE` (removed, not translated)
+- Full-text search
+- Some JSON functions
+
+## Use Cases
+
+- **CGO-free Go binaries**: Access SQLite without CGO in your main binary
+- **Development**: Use familiar MySQL tools with SQLite databases
+- **Testing**: Lightweight SQL database for test environments
+- **Migration**: Gradually move from MySQL to SQLite or vice versa
+
+## Dependencies
+
+- `github.com/go-mysql-org/go-mysql` — MySQL wire protocol server
+- `github.com/mattn/go-sqlite3` — SQLite driver (CGO, only in proxy)
+- `github.com/go-sql-driver/mysql` — MySQL client driver (for Go consumers)
 
 ## License
 
