@@ -242,11 +242,37 @@ func (t *Translator) translateCreateTable(sql string) string {
 	// Remove table options trailing semicolons before closing paren
 	// This handles cases like ") ENGINE=InnoDB;"
 
+	// Convert UNIQUE INDEX idx_name (col) -> UNIQUE(col)
+	// SQLite doesn't support inline UNIQUE INDEX syntax in CREATE TABLE
+	re := regexp.MustCompile("(?i)UNIQUE\\s+INDEX\\s+`[^`]+`\\s*\\(([^)]+)\\)")
+	sql = re.ReplaceAllString(sql, "UNIQUE($1)")
+
+	// Extract non-unique INDEX declarations and generate CREATE INDEX statements
+	indexRe := regexp.MustCompile("(?i)(,\\s*)?INDEX\\s+`([^`]+)`\\s*\\(([^)]+)\\)")
+	indexes := indexRe.FindAllStringSubmatch(sql, -1)
+	sql = indexRe.ReplaceAllString(sql, "")
+
+	// Extract table name for CREATE INDEX
+	var tableName string
+	tableRe := regexp.MustCompile("(?i)CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?`?([^`\\s(]+)`?")
+	if m := tableRe.FindStringSubmatch(sql); len(m) > 1 {
+		tableName = m[1]
+	}
+
 	// Translate column types
 	sql = t.translateColumnTypes(sql)
 
 	// Translate AUTO_INCREMENT keyword
 	sql = translateAutoIncrement(sql)
+
+	// Append CREATE INDEX statements
+	if tableName != "" {
+		for _, match := range indexes {
+			indexName := match[2]
+			columns := match[3]
+			sql += "; CREATE INDEX IF NOT EXISTS `" + indexName + "` ON `" + tableName + "` (" + columns + ")"
+		}
+	}
 
 	return sql
 }
@@ -388,6 +414,9 @@ func (t *Translator) translateFunctions(sql string) string {
 	// DATE_FORMAT -> strftime
 	sql = translateDateFormat(sql)
 
+	// VERSION() -> sqlite_version()
+	sql = replaceFunction(sql, `VERSION\(\)`, `sqlite_version()`)
+
 	return sql
 }
 
@@ -488,12 +517,12 @@ func replaceFunction(sql string, pattern string, replacement string) string {
 func defaultTypeMap() map[string]string {
 	return map[string]string{
 		// Integer types
-		"TINYINT":    "INTEGER",
-		"SMALLINT":   "INTEGER",
-		"MEDIUMINT":  "INTEGER",
-		"INT":        "INTEGER",
-		"INTEGER":    "INTEGER",
-		"BIGINT":     "INTEGER",
+		"TINYINT":   "INTEGER",
+		"SMALLINT":  "INTEGER",
+		"MEDIUMINT": "INTEGER",
+		"INT":       "INTEGER",
+		"INTEGER":   "INTEGER",
+		"BIGINT":    "INTEGER",
 
 		// Floating point
 		"FLOAT":   "REAL",

@@ -132,6 +132,16 @@ func TestTranslateCreateTable(t *testing.T) {
 			input:    "CREATE TABLE users (id INT AUTO_INCREMENT, name VARCHAR(255), active BOOLEAN)",
 			contains: "name TEXT",
 		},
+		{
+			name:     "UNIQUE INDEX",
+			input:    "CREATE TABLE `users` (`id` varchar(36),`email` varchar(255),`created_at` datetime(3) NULL,PRIMARY KEY (`id`),UNIQUE INDEX `idx_users_email` (`email`))",
+			contains: `UNIQUE("email")`,
+		},
+		{
+			name:     "Non-unique INDEX",
+			input:    "CREATE TABLE `workspaces` (`id` varchar(36),`name` varchar(255) NOT NULL,`owner_id` varchar(36) NOT NULL,PRIMARY KEY (`id`),INDEX `idx_workspaces_owner_id` (`owner_id`))",
+			contains: "CREATE INDEX IF NOT EXISTS",
+		},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +176,11 @@ func TestTranslateFunctions(t *testing.T) {
 			name:     "UNIX_TIMESTAMP",
 			input:    "SELECT UNIX_TIMESTAMP()",
 			expected: "SELECT strftime('%s','now')",
+		},
+		{
+			name:     "VERSION",
+			input:    "SELECT VERSION()",
+			expected: "SELECT sqlite_version()",
 		},
 	}
 

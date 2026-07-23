@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/peterh/liner"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/peterh/liner"
 )
 
 var version = "1.0.0"

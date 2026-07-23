@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 
 	storage "github.com/dot5enko/sqliteproxy/storage"
 	translator "github.com/dot5enko/sqliteproxy/translator"
@@ -64,40 +65,135 @@ func (h *SessionHandler) HandleQuery(query string) (*mysql.Result, error) {
 		return nil, errNotBound()
 	}
 
-	trimmed := strings.TrimSpace(query)
-	upper := strings.ToUpper(trimmed)
+	stmts, _, err := sqlParser.ParseSQL(query)
+	if err != nil || len(stmts) == 0 {
+		return h.handleTranslated(query, stmts)
+	}
 
-	if strings.HasPrefix(upper, "USE ") {
-		name := strings.TrimSpace(trimmed[4:])
-		name = strings.Trim(name, "`\"'")
+	stmt := stmts[0]
+	switch s := stmt.(type) {
+	case *ast.UseStmt:
+		name := strings.Trim(s.DBName, "`\"'")
 		if err := h.selectDatabase(name); err != nil {
 			return nil, err
 		}
 		return &mysql.Result{}, nil
+
+	case *ast.ShowStmt:
+		if s.Tp == ast.ShowDatabases {
+			return h.showDatabases()
+		}
+		return h.handleTranslated(query, stmts)
+
+	case *ast.SelectStmt:
+		if isSelectDatabase(s) {
+			return h.selectDatabaseName()
+		}
+		if extractInfoSchemaTable(s) != "" {
+			if result, handled := h.handleInfoSchemaQuery(query); handled {
+				return result, nil
+			}
+		}
+		return h.handleTranslated(query, stmts)
+
+	default:
+		return h.handleTranslated(query, stmts)
+	}
+}
+
+// handleTranslated translates the query and executes it.
+func (h *SessionHandler) handleTranslated(query string, stmts []ast.StmtNode) (*mysql.Result, error) {
+	if len(stmts) == 0 {
+		translated := h.translator.Translate(query)
+		fmt.Printf("[DEBUG] Translated: %s\n", translated)
+		return h.executeTranslated(nil, translated)
 	}
 
-	if upper == "SHOW DATABASES" || upper == "SHOW SCHEMAS" {
-		return h.showDatabases()
+	var lastResult *mysql.Result
+	for _, stmt := range stmts {
+		translated := h.translator.Translate(stmt.Text())
+		fmt.Printf("[DEBUG] Translated: %s\n", translated)
+		result, err := h.executeTranslated(stmt, translated)
+		if err != nil {
+			return nil, err
+		}
+		lastResult = result
 	}
+	if lastResult != nil {
+		return lastResult, nil
+	}
+	return &mysql.Result{}, nil
+}
 
-	translated := h.translator.Translate(query)
-	fmt.Printf("[DEBUG] Translated: %s\n", translated)
-
-	upper = strings.ToUpper(strings.TrimSpace(translated))
-	switch upper {
-	case "BEGIN TRANSACTION":
+// executeTranslated executes a single translated statement, using the AST to determine the command type.
+func (h *SessionHandler) executeTranslated(stmt ast.StmtNode, translated string) (*mysql.Result, error) {
+	switch stmt.(type) {
+	case *ast.BeginStmt:
 		return h.handleBegin()
-	case "COMMIT":
+	case *ast.CommitStmt:
 		return h.handleCommit()
-	case "ROLLBACK":
+	case *ast.RollbackStmt:
 		return h.handleRollback()
+	case *ast.SelectStmt, *ast.ShowStmt:
+		return h.query(translated)
+	case *ast.InsertStmt, *ast.UpdateStmt, *ast.DeleteStmt:
+		return h.exec(translated)
+	default:
+		if isQueryType(translated) {
+			return h.query(translated)
+		}
+		return h.exec(translated)
 	}
+}
 
-	return h.execute(translated)
+// isQueryType checks if a translated statement returns rows.
+func isQueryType(sql string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upper, "SELECT") ||
+		strings.HasPrefix(upper, "PRAGMA") ||
+		strings.HasPrefix(upper, "SHOW") ||
+		strings.HasPrefix(upper, "DESCRIBE") ||
+		strings.HasPrefix(upper, "DESC") ||
+		strings.HasPrefix(upper, "EXPLAIN")
+}
+
+// isQueryStmt checks if an AST statement returns rows.
+func isQueryStmt(stmt ast.StmtNode) bool {
+	switch stmt.(type) {
+	case *ast.SelectStmt, *ast.ShowStmt:
+		return true
+	default:
+		return isQueryType(stmt.Text())
+	}
+}
+
+// isSelectDatabase checks if the SELECT statement is SELECT DATABASE().
+func isSelectDatabase(sel *ast.SelectStmt) bool {
+	if sel.Fields == nil {
+		return false
+	}
+	for _, field := range sel.Fields.Fields {
+		if fn, ok := field.Expr.(*ast.FuncCallExpr); ok {
+			if strings.EqualFold(fn.FnName.L, "database") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *SessionHandler) showDatabases() (*mysql.Result, error) {
 	rs, err := mysql.BuildSimpleResultset([]string{"Database"}, [][]interface{}{
+		{h.db.Name},
+	}, false)
+	if err != nil {
+		return nil, err
+	}
+	return &mysql.Result{Resultset: rs}, nil
+}
+
+func (h *SessionHandler) selectDatabaseName() (*mysql.Result, error) {
+	rs, err := mysql.BuildSimpleResultset([]string{"DATABASE()"}, [][]interface{}{
 		{h.db.Name},
 	}, false)
 	if err != nil {
@@ -181,12 +277,8 @@ func (h *SessionHandler) HandleStmtPrepare(query string) (int, int, interface{},
 	paramCount := strings.Count(translated, "?")
 
 	columnCount := 0
-	upper := strings.ToUpper(strings.TrimSpace(query))
-	if strings.HasPrefix(upper, "SELECT") ||
-		strings.HasPrefix(upper, "SHOW") ||
-		strings.HasPrefix(upper, "DESCRIBE") ||
-		strings.HasPrefix(upper, "DESC") ||
-		strings.HasPrefix(upper, "PRAGMA") {
+	stmts, _, _ := sqlParser.ParseSQL(query)
+	if len(stmts) > 0 && isQueryStmt(stmts[0]) {
 		rows, err := stmt.Query()
 		if err == nil {
 			cols, _ := rows.Columns()
@@ -205,12 +297,8 @@ func (h *SessionHandler) HandleStmtExecute(context interface{}, query string, ar
 		return nil, fmt.Errorf("invalid prepared statement context")
 	}
 
-	upper := strings.ToUpper(strings.TrimSpace(query))
-	if strings.HasPrefix(upper, "SELECT") ||
-		strings.HasPrefix(upper, "SHOW") ||
-		strings.HasPrefix(upper, "DESCRIBE") ||
-		strings.HasPrefix(upper, "DESC") ||
-		strings.HasPrefix(upper, "PRAGMA") {
+	stmts, _, _ := sqlParser.ParseSQL(query)
+	if len(stmts) > 0 && isQueryStmt(stmts[0]) {
 		rows, err := stmt.Query(args...)
 		if err != nil {
 			return nil, err
@@ -325,21 +413,6 @@ func (h *SessionHandler) prepare(query string) (*sql.Stmt, error) {
 	return h.session.GetConnection().PrepareContext(context.Background(), query)
 }
 
-func (h *SessionHandler) execute(query string) (*mysql.Result, error) {
-	upper := strings.ToUpper(strings.TrimSpace(query))
-
-	if strings.HasPrefix(upper, "SELECT") ||
-		strings.HasPrefix(upper, "PRAGMA") ||
-		strings.HasPrefix(upper, "SHOW") ||
-		strings.HasPrefix(upper, "DESCRIBE") ||
-		strings.HasPrefix(upper, "DESC") ||
-		strings.HasPrefix(upper, "EXPLAIN") {
-		return h.query(query)
-	}
-
-	return h.exec(query)
-}
-
 func (h *SessionHandler) query(query string) (*mysql.Result, error) {
 	rows, err := h.queryRows(query)
 	if err != nil {
@@ -350,6 +423,30 @@ func (h *SessionHandler) query(query string) (*mysql.Result, error) {
 	resultset, err := buildResultset(rows)
 	if err != nil {
 		return nil, err
+	}
+
+	rowsCount := 0
+	if resultset != nil && resultset.RowDatas != nil {
+		rowsCount = len(resultset.RowDatas)
+	}
+	fmt.Printf("[DEBUG] Result: rows_count=%d\n", rowsCount)
+
+	if resultset != nil && resultset.RowDatas != nil {
+		for i, row := range resultset.RowDatas {
+			if i >= 2 {
+				break
+			}
+			fieldValues, err := row.ParseText(resultset.Fields, nil)
+			if err != nil {
+				fmt.Printf("[DEBUG]   row[%d]: error parsing: %v\n", i, err)
+				continue
+			}
+			vals := make([]interface{}, len(fieldValues))
+			for j, fv := range fieldValues {
+				vals[j] = fv.Value()
+			}
+			fmt.Printf("[DEBUG]   row[%d]: %v\n", i, vals)
+		}
 	}
 
 	return &mysql.Result{
@@ -365,6 +462,8 @@ func (h *SessionHandler) exec(query string) (*mysql.Result, error) {
 
 	affected, _ := result.RowsAffected()
 	insertId, _ := result.LastInsertId()
+
+	fmt.Printf("[DEBUG] Result: affected=%d, insert_id=%d\n", affected, insertId)
 
 	return &mysql.Result{
 		AffectedRows: uint64(affected),
