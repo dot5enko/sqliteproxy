@@ -36,17 +36,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.listDatabases(w, r)
 	case path == "/v1/databases" && r.Method != http.MethodGet && r.Method != http.MethodPost:
 		writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+
+	case path == "/v1/databases/import" && r.Method == http.MethodPost:
+		h.importDatabase(w, r)
+
 	case strings.HasPrefix(path, "/v1/databases/"):
-		name := strings.TrimPrefix(path, "/v1/databases/")
-		if name == "" || strings.Contains(name, "/") {
+		parts := strings.TrimPrefix(path, "/v1/databases/")
+		if parts == "" {
 			writeError(w, http.StatusNotFound, "database_not_found", "database not found")
 			return
 		}
-		if r.Method != http.MethodGet {
-			writeMethodNotAllowed(w, http.MethodGet)
+
+		slashIdx := strings.Index(parts, "/")
+		if slashIdx < 0 {
+			// /v1/databases/{name} — GET only
+			if r.Method != http.MethodGet {
+				writeMethodNotAllowed(w, http.MethodGet)
+				return
+			}
+			h.getDatabase(w, r, parts)
 			return
 		}
-		h.getDatabase(w, r, name)
+
+		name := parts[:slashIdx]
+		action := parts[slashIdx+1:]
+		if name == "" || action == "" {
+			writeError(w, http.StatusNotFound, "not_found", "not found")
+			return
+		}
+
+		switch {
+		case action == "export" && r.Method == http.MethodGet:
+			h.exportDatabase(w, r, name)
+		case action == "query" && r.Method == http.MethodPost:
+			h.queryDatabase(w, r, name)
+		default:
+			writeError(w, http.StatusNotFound, "not_found", "not found")
+		}
+
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 	}
@@ -99,6 +126,83 @@ func (h *Handler) getDatabase(w http.ResponseWriter, r *http.Request, name strin
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, db.Details())
+}
+
+func (h *Handler) exportDatabase(w http.ResponseWriter, r *http.Request, name string) {
+	path, err := h.store.Export(name)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "database_not_found", "database not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to export database")
+		return
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+".sqlite\"")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, path)
+}
+
+func (h *Handler) importDatabase(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(maxBodyBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "multipart form required")
+		return
+	}
+
+	label := r.FormValue("label")
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "missing file field")
+		return
+	}
+	defer file.Close()
+
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "failed to read uploaded file")
+		return
+	}
+
+	db, err := h.store.Import(label, fileData)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "import_failed", err.Error())
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Location", "/v1/databases/"+db.Name)
+	writeJSON(w, http.StatusCreated, db.Details())
+}
+
+func (h *Handler) queryDatabase(w http.ResponseWriter, r *http.Request, name string) {
+	var req struct {
+		Query string `json:"query"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "query is required")
+		return
+	}
+
+	columns, rows, err := h.store.Query(name, req.Query)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "database_not_found", "database not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "query_error", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"columns": columns,
+		"rows":    rows,
+	})
 }
 
 func decodeJSON(r *http.Request, dst any) error {

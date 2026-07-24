@@ -438,6 +438,177 @@ func (s *Store) Stats() map[string]sql.DBStats {
 	return out
 }
 
+// Export returns the filesystem path of the named database's SQLite file.
+func (s *Store) Export(name string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return "", ErrClosed
+	}
+	db, ok := s.byName[name]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return db.Path, nil
+}
+
+// Import writes a user-supplied SQLite file into the storage root, validates
+// it can be opened, registers it in the management catalog, and returns the
+// new database entry.
+func (s *Store) Import(label string, fileData []byte) (*Database, error) {
+	label, err := normalizeLabel(label)
+	if err != nil {
+		return nil, err
+	}
+
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		return nil, ErrClosed
+	}
+
+	name := "db_" + strings.ToLower(ulid.Make().String())
+	username := "u_" + strings.ToLower(ulid.Make().String())
+	password, err := generatePassword()
+	if err != nil {
+		return nil, err
+	}
+	createdAt := time.Now().UTC()
+
+	tx, err := s.mgmt.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
+		INSERT INTO databases (name, label, username, password, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, name, label, username, password, StatusCreating, createdAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("reserve database metadata: %w", err)
+	}
+
+	path := s.dbPath(name)
+	if err := os.WriteFile(path, fileData, 0o600); err != nil {
+		return nil, fmt.Errorf("write database file: %w", err)
+	}
+
+	validatePool, err := s.openTenantPool(path)
+	if err != nil {
+		s.cleanupImportFiles(path)
+		return nil, fmt.Errorf("validate database file (not a valid SQLite): %w", err)
+	}
+	if err := validatePool.Close(); err != nil {
+		return nil, err
+	}
+
+	_, err = tx.Exec(`UPDATE databases SET status = ? WHERE name = ?`, StatusReady, name)
+	if err != nil {
+		s.cleanupImportFiles(path)
+		return nil, fmt.Errorf("mark database ready: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		s.cleanupImportFiles(path)
+		return nil, err
+	}
+
+	pool, err := s.openTenantPool(path)
+	if err != nil {
+		return nil, fmt.Errorf("open imported database pool: %w", err)
+	}
+
+	db := &Database{
+		Record: Record{
+			Name:      name,
+			Label:     label,
+			Username:  username,
+			Password:  password,
+			Status:    StatusReady,
+			CreatedAt: createdAt,
+		},
+		Path: path,
+		Pool: pool,
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		pool.Close()
+		return nil, ErrClosed
+	}
+	if err := s.publishLocked(db); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func (s *Store) cleanupImportFiles(path string) {
+	os.Remove(path)
+	os.Remove(path + "-wal")
+	os.Remove(path + "-shm")
+}
+
+// Query executes an arbitrary SQL statement against the named database and
+// returns column names and rows. The connection is opened unrestricted so
+// power users can run any statement including PRAGMAs.
+func (s *Store) Query(name string, query string) ([]string, [][]any, error) {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return nil, nil, ErrClosed
+	}
+	db, ok := s.byName[name]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, nil, ErrNotFound
+	}
+
+	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=%d&_foreign_keys=on",
+		db.Path,
+		int(s.config.BusyTimeout.Milliseconds()),
+	)
+	conn, err := sql.Open(sqlite.DriverName, dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open query connection: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.Query(query)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execute query: %w", err)
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, nil, fmt.Errorf("get columns: %w", err)
+	}
+
+	var allRows [][]any
+	for rows.Next() {
+		vals := make([]any, len(columns))
+		valPtrs := make([]any, len(columns))
+		for i := range vals {
+			valPtrs[i] = &vals[i]
+		}
+		if err := rows.Scan(valPtrs...); err != nil {
+			return nil, nil, fmt.Errorf("scan row: %w", err)
+		}
+		allRows = append(allRows, vals)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate rows: %w", err)
+	}
+
+	return columns, allRows, nil
+}
+
 func normalizeLabel(label string) (string, error) {
 	label = strings.TrimSpace(label)
 	if label == "" {
