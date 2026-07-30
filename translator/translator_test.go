@@ -2,6 +2,9 @@ package translator
 
 import (
 	"testing"
+
+	"github.com/pingcap/tidb/pkg/parser"
+	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
 func TestTranslateBasicSelect(t *testing.T) {
@@ -15,30 +18,38 @@ func TestTranslateBasicSelect(t *testing.T) {
 		{
 			name:     "Simple select",
 			input:    "SELECT * FROM users",
-			expected: "SELECT * FROM users",
+			expected: `select * from "users"`,
 		},
 		{
 			name:     "Select with where",
 			input:    "SELECT * FROM users WHERE id = 1",
-			expected: "SELECT * FROM users WHERE id = 1",
+			expected: `select * from "users" where "id"=1`,
 		},
 		{
 			name:     "Select with limit offset",
 			input:    "SELECT * FROM users LIMIT 10, 20",
-			expected: "SELECT * FROM users LIMIT 20 OFFSET 10",
+			expected: `select * from "users" LIMIT 20 OFFSET 10`,
 		},
 		{
 			name:     "Select with backticks",
 			input:    "SELECT `id`, `name` FROM `users`",
-			expected: "SELECT \"id\", \"name\" FROM \"users\"",
+			expected: `select "id","name" from "users"`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := tr.Translate(tt.input)
+			p := parser.New()
+			stmts, _, err := p.ParseSQL(tt.input)
+			if err != nil || len(stmts) == 0 {
+				t.Fatalf("ParseSQL failed: %v", err)
+			}
+			result, err := tr.TranslateAST(stmts[0])
+			if err != nil {
+				t.Fatalf("TranslateAST failed: %v", err)
+			}
 			if result != tt.expected {
-				t.Errorf("Translate() = %q, want %q", result, tt.expected)
+				t.Errorf("TranslateAST() = %q, want %q", result, tt.expected)
 			}
 		})
 	}
@@ -120,17 +131,17 @@ func TestTranslateCreateTable(t *testing.T) {
 		{
 			name:     "Remove engine",
 			input:    "CREATE TABLE users (id INT) ENGINE=InnoDB",
-			contains: "CREATE TABLE users (id INTEGER)",
+			contains: `"id" INTEGER`,
 		},
 		{
 			name:     "Remove charset",
 			input:    "CREATE TABLE users (id INT) DEFAULT CHARSET=utf8mb4",
-			contains: "CREATE TABLE users (id INTEGER)",
+			contains: `"id" INTEGER`,
 		},
 		{
 			name:     "Translate types",
 			input:    "CREATE TABLE users (id INT AUTO_INCREMENT, name VARCHAR(255), active BOOLEAN)",
-			contains: "name TEXT",
+			contains: `"name" TEXT`,
 		},
 		{
 			name:     "UNIQUE INDEX",
@@ -146,9 +157,17 @@ func TestTranslateCreateTable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := tr.Translate(tt.input)
+			p := parser.New()
+			stmts, _, err := p.ParseSQL(tt.input)
+			if err != nil || len(stmts) == 0 {
+				t.Fatalf("ParseSQL failed: %v", err)
+			}
+			result, err := tr.TranslateAST(stmts[0])
+			if err != nil {
+				t.Fatalf("TranslateAST failed: %v", err)
+			}
 			if !contains(result, tt.contains) {
-				t.Errorf("Translate() = %q, should contain %q", result, tt.contains)
+				t.Errorf("TranslateAST() = %q, should contain %q", result, tt.contains)
 			}
 		})
 	}

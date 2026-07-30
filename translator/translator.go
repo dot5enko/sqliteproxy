@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/format"
 )
 
 // Translator converts MySQL SQL to SQLite SQL
@@ -43,10 +46,31 @@ func (t *Translator) Translate(sql string) string {
 	// Translate functions
 	sql = t.translateFunctions(sql)
 
-	// Clean up MySQL-specific syntax
-	sql = t.cleanupMySQL(sql)
-
 	return sql
+}
+
+// TranslateAST converts a parsed MySQL AST node to SQLite SQL using the AST's
+// Restore with SQLite-compatible flags (double-quoted identifiers, single-quoted
+// strings without backslash escaping).
+func (t *Translator) TranslateAST(stmt ast.StmtNode) (string, error) {
+	flags := format.RestoreStringSingleQuotes | format.RestoreNameDoubleQuotes | format.RestoreKeyWordLowercase
+	var buf strings.Builder
+	ctx := format.NewRestoreCtx(flags, &buf)
+	if err := stmt.Restore(ctx); err != nil {
+		return "", fmt.Errorf("restore failed: %w", err)
+	}
+	sql := buf.String()
+
+	// Apply DDL translations (type mapping, AUTO_INCREMENT, etc.)
+	sql = t.translateDDL(sql)
+
+	// Translate DML (LIMIT syntax, boolean literals, etc.)
+	sql = t.translateDML(sql)
+
+	// Translate functions
+	sql = t.translateFunctions(sql)
+
+	return sql, nil
 }
 
 // handleSpecialCommands handles MySQL meta-commands
@@ -250,17 +274,21 @@ func (t *Translator) translateCreateTable(sql string) string {
 
 	// Convert UNIQUE INDEX idx_name (col) -> UNIQUE(col)
 	// SQLite doesn't support inline UNIQUE INDEX syntax in CREATE TABLE
-	re := regexp.MustCompile("(?i)UNIQUE\\s+INDEX\\s+`[^`]+`\\s*\\(([^)]+)\\)")
+	re := regexp.MustCompile(`(?i)UNIQUE\s+INDEX\s+[` + "`" + `"][^` + "`" + `"]+["` + "`" + `]\s*\(([^)]+)\)`)
 	sql = re.ReplaceAllString(sql, "UNIQUE($1)")
 
+	// Handle AST-Restore style: unique "idx_name"("col") without INDEX keyword
+	re2 := regexp.MustCompile(`(?i)\bunique\s+"[^"]+"\s*\(([^)]+)\)`)
+	sql = re2.ReplaceAllString(sql, "UNIQUE($1)")
+
 	// Extract non-unique INDEX declarations and generate CREATE INDEX statements
-	indexRe := regexp.MustCompile("(?i)(,\\s*)?INDEX\\s+`([^`]+)`\\s*\\(([^)]+)\\)")
+	indexRe := regexp.MustCompile(`(?i)(,\s*)?INDEX\s+[` + "`" + `"]([^` + "`" + `"]+)["` + "`" + `]\s*\(([^)]+)\)`)
 	indexes := indexRe.FindAllStringSubmatch(sql, -1)
 	sql = indexRe.ReplaceAllString(sql, "")
 
 	// Extract table name for CREATE INDEX
 	var tableName string
-	tableRe := regexp.MustCompile("(?i)CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?`?([^`\\s(]+)`?")
+	tableRe := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[` + "`" + `"]?([^` + "`" + `"\s(]+)["` + "`" + `]?`)
 	if m := tableRe.FindStringSubmatch(sql); len(m) > 1 {
 		tableName = m[1]
 	}
@@ -524,17 +552,6 @@ func translateBoolean(sql string) string {
 func removeOnDuplicateKeyUpdate(sql string) string {
 	re := regexp.MustCompile(`(?i)\s+ON\s+DUPLICATE\s+KEY\s+UPDATE\s+.*$`)
 	return re.ReplaceAllString(sql, "")
-}
-
-// cleanupMySQL removes remaining MySQL-specific syntax
-func (t *Translator) cleanupMySQL(sql string) string {
-	// Remove backticks (SQLite uses double quotes for identifiers)
-	sql = strings.ReplaceAll(sql, "`", "\"")
-
-	// Remove MySQL-specific comments
-	sql = removeOption(sql, `/\*![0-9]+\s+[^*]*\*/`)
-
-	return sql
 }
 
 // Helper functions

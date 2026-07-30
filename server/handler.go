@@ -112,7 +112,12 @@ func (h *SessionHandler) handleTranslated(query string, stmts []ast.StmtNode) (*
 
 	var lastResult *mysql.Result
 	for _, stmt := range stmts {
-		translated := h.translator.Translate(stmt.Text())
+		translated, err := h.translator.TranslateAST(stmt)
+		if err != nil {
+			// Fallback to text-based translation
+			fmt.Printf("[DEBUG] TranslateAST error: %v, falling back to text\n", err)
+			translated = h.translator.Translate(stmt.Text())
+		}
 		fmt.Printf("[DEBUG] Translated: %s\n", translated)
 		result, err := h.executeTranslated(stmt, translated)
 		if err != nil {
@@ -559,6 +564,7 @@ func (h *SessionHandler) query(query string) (*mysql.Result, error) {
 func (h *SessionHandler) exec(query string) (*mysql.Result, error) {
 	result, err := h.execResult(query)
 	if err != nil {
+		fmt.Printf("[DEBUG] Exec error: %v\n", err)
 		return nil, err
 	}
 
