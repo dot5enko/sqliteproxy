@@ -291,6 +291,11 @@ func TestTranslateInsert(t *testing.T) {
 			input:    "INSERT INTO users (id, name) VALUES (1, 'test') ON DUPLICATE KEY UPDATE name='test'",
 			contains: "INSERT INTO users (id, name) VALUES (1, 'test')",
 		},
+		{
+			name:     "Insert with escaped quote",
+			input:    "INSERT INTO tasks (name) VALUES ('Yulia\\'s template marketplace')",
+			contains: "'Yulia''s template marketplace'",
+		},
 	}
 
 	for _, tt := range tests {
@@ -298,6 +303,46 @@ func TestTranslateInsert(t *testing.T) {
 			result := tr.Translate(tt.input)
 			if !contains(result, tt.contains) {
 				t.Errorf("Translate() = %q, should contain %q", result, tt.contains)
+			}
+		})
+	}
+}
+
+func TestTranslateStringEscapes(t *testing.T) {
+	tr := New()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Single escaped quote",
+			input:    "INSERT INTO t (c) VALUES ('it\\'s working')",
+			expected: `INSERT INTO t (c) VALUES ('it''s working')`,
+		},
+		{
+			name:     "Multiple escaped quotes",
+			input:    "INSERT INTO t (c) VALUES ('don\\'t stop', 'can\\'t')",
+			expected: `INSERT INTO t (c) VALUES ('don''t stop', 'can''t')`,
+		},
+		{
+			name:     "Standard SQL doubled quotes preserved",
+			input:    "INSERT INTO t (c) VALUES ('it''s fine')",
+			expected: `INSERT INTO t (c) VALUES ('it''s fine')`,
+		},
+		{
+			name:     "No quotes",
+			input:    "INSERT INTO t (c) VALUES (123)",
+			expected: `INSERT INTO t (c) VALUES (123)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tr.Translate(tt.input)
+			if result != tt.expected {
+				t.Errorf("Translate() = %q, want %q", result, tt.expected)
 			}
 		})
 	}

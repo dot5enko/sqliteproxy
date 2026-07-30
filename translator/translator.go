@@ -46,6 +46,9 @@ func (t *Translator) Translate(sql string) string {
 	// Translate functions
 	sql = t.translateFunctions(sql)
 
+	// Convert MySQL-style \\' to SQLite-style '' in string literals
+	sql = translateStringEscapes(sql)
+
 	return sql
 }
 
@@ -69,6 +72,9 @@ func (t *Translator) TranslateAST(stmt ast.StmtNode) (string, error) {
 
 	// Translate functions
 	sql = t.translateFunctions(sql)
+
+	// Convert MySQL-style \\' to SQLite-style '' in string literals
+	sql = translateStringEscapes(sql)
 
 	return sql, nil
 }
@@ -574,6 +580,44 @@ func replaceFunction(sql string, pattern string, replacement string) string {
 }
 
 // defaultTypeMap returns MySQL to SQLite type mappings
+// translateStringEscapes converts MySQL-style backslash-escaped single quotes
+// (\\') to SQLite-style doubled single quotes ('') within string literals.
+func translateStringEscapes(sql string) string {
+	var result strings.Builder
+	inString := false
+	i := 0
+	for i < len(sql) {
+		c := sql[i]
+		if c == '\'' {
+			if !inString {
+				inString = true
+				result.WriteByte(c)
+			} else {
+				// Check if next char is also a single quote (SQL-standard escape)
+				if i+1 < len(sql) && sql[i+1] == '\'' {
+					result.WriteByte(c)
+					result.WriteByte(c)
+					i += 2
+					continue
+				}
+				// End of string
+				inString = false
+				result.WriteByte(c)
+			}
+		} else if c == '\\' && inString && i+1 < len(sql) && sql[i+1] == '\'' {
+			// MySQL-style \\' inside string -> SQLite ''
+			result.WriteByte('\'')
+			result.WriteByte('\'')
+			i += 2
+			continue
+		} else {
+			result.WriteByte(c)
+		}
+		i++
+	}
+	return result.String()
+}
+
 func defaultTypeMap() map[string]string {
 	return map[string]string{
 		// Integer types
