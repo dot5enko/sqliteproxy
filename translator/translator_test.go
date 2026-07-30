@@ -437,6 +437,46 @@ func TestTranslateTransactionCommands(t *testing.T) {
 	}
 }
 
+func TestTranslateCharacterSetIntroducers(t *testing.T) {
+	tr := New()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "utf8mb4 introducer in WHERE",
+			input:    "SELECT * FROM workspace_members WHERE user_id = _utf8mb4'36a8aff3-a745-42ce-ab2f-9125b877cd01'",
+			expected: "SELECT * FROM workspace_members WHERE user_id = '36a8aff3-a745-42ce-ab2f-9125b877cd01'",
+		},
+		{
+			name:     "latin1 introducer in INSERT",
+			input:    "INSERT INTO t (c) VALUES (_latin1'hello')",
+			expected: "INSERT INTO t (c) VALUES ('hello')",
+		},
+		{
+			name:     "multiple introducers",
+			input:    "SELECT * FROM t WHERE a = _utf8'foo' AND b = _utf8mb4'bar'",
+			expected: "SELECT * FROM t WHERE a = 'foo' AND b = 'bar'",
+		},
+		{
+			name:     "no introducer",
+			input:    "SELECT * FROM t WHERE a = 'plain'",
+			expected: "SELECT * FROM t WHERE a = 'plain'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tr.Translate(tt.input)
+			if result != tt.expected {
+				t.Errorf("Translate() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }

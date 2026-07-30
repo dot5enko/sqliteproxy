@@ -46,6 +46,9 @@ func (t *Translator) Translate(sql string) string {
 	// Translate functions
 	sql = t.translateFunctions(sql)
 
+	// Strip MySQL character-set introducers like _utf8mb4'...'
+	sql = translateCharacterSetIntroducers(sql)
+
 	// Convert MySQL-style \\' to SQLite-style '' in string literals
 	sql = translateStringEscapes(sql)
 
@@ -72,6 +75,9 @@ func (t *Translator) TranslateAST(stmt ast.StmtNode) (string, error) {
 
 	// Translate functions
 	sql = t.translateFunctions(sql)
+
+	// Strip MySQL character-set introducers like _utf8mb4'...'
+	sql = translateCharacterSetIntroducers(sql)
 
 	// Convert MySQL-style \\' to SQLite-style '' in string literals
 	sql = translateStringEscapes(sql)
@@ -579,7 +585,14 @@ func replaceFunction(sql string, pattern string, replacement string) string {
 	return re.ReplaceAllString(sql, replacement)
 }
 
-// defaultTypeMap returns MySQL to SQLite type mappings
+// translateCharacterSetIntroducers strips MySQL character-set introducers
+// such as _utf8mb4'...' or _latin1'...' so only the string literal remains.
+func translateCharacterSetIntroducers(sql string) string {
+	// Match _charsetName'string' where string may contain standard escapes
+	re := regexp.MustCompile(`(?i)_[a-z0-9]+('(?:[^'\\]|\\.|'')*')`)
+	return re.ReplaceAllString(sql, "$1")
+}
+
 // translateStringEscapes converts MySQL-style backslash-escaped single quotes
 // (\\') to SQLite-style doubled single quotes ('') within string literals.
 func translateStringEscapes(sql string) string {
