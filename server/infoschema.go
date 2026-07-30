@@ -14,10 +14,23 @@ import (
 
 var sqlParser = parser.New()
 
+// safeParseSQL wraps sqlParser.ParseSQL with a recover to catch panics from the
+// TiDB parser (e.g. nil interface conversions on certain SQL syntaxes).
+func safeParseSQL(query string) (stmts []ast.StmtNode, warns []error, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("parser panic: %v", r)
+			stmts = nil
+			warns = nil
+		}
+	}()
+	return sqlParser.ParseSQL(query)
+}
+
 // handleInfoSchemaQuery parses the query and handles information_schema requests.
 // Returns (result, true) if handled, (nil, false) if the query is not an information_schema query.
 func (h *SessionHandler) handleInfoSchemaQuery(query string) (*mysql.Result, bool) {
-	stmts, _, err := sqlParser.ParseSQL(query)
+	stmts, _, err := safeParseSQL(query)
 	if err != nil || len(stmts) == 0 {
 		return nil, false
 	}

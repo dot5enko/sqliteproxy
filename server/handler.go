@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -65,7 +66,7 @@ func (h *SessionHandler) HandleQuery(query string) (*mysql.Result, error) {
 		return nil, errNotBound()
 	}
 
-	stmts, _, err := sqlParser.ParseSQL(query)
+	stmts, _, err := safeParseSQL(query)
 	if err != nil || len(stmts) == 0 {
 		return h.handleTranslated(query, stmts)
 	}
@@ -127,6 +128,11 @@ func (h *SessionHandler) handleTranslated(query string, stmts []ast.StmtNode) (*
 
 // executeTranslated executes a single translated statement, using the AST to determine the command type.
 func (h *SessionHandler) executeTranslated(stmt ast.StmtNode, translated string) (*mysql.Result, error) {
+	// Handle table reconstruction for MODIFY COLUMN
+	if strings.HasPrefix(translated, "-- RECONSTRUCT_TABLE:") {
+		return h.handleReconstructTable(translated)
+	}
+
 	switch stmt.(type) {
 	case *ast.BeginStmt:
 		return h.handleBegin()
@@ -155,6 +161,102 @@ func isQueryType(sql string) bool {
 		strings.HasPrefix(upper, "DESCRIBE") ||
 		strings.HasPrefix(upper, "DESC") ||
 		strings.HasPrefix(upper, "EXPLAIN")
+}
+
+// handleReconstructTable handles ALTER TABLE ... MODIFY COLUMN via table reconstruction
+// Format: "-- RECONSTRUCT_TABLE: tableName columnName newColumnDef"
+func (h *SessionHandler) handleReconstructTable(marker string) (*mysql.Result, error) {
+	parts := strings.SplitN(marker, " ", 5)
+	if len(parts) < 5 {
+		return nil, fmt.Errorf("invalid reconstruct marker: %s", marker)
+	}
+	tableName := parts[2]
+	columnName := parts[3]
+	newColumnDef := parts[4]
+
+	// Translate the column definition (type mapping, etc.)
+	newColumnDef = h.translator.Translate("CREATE TABLE _dummy (" + columnName + " " + newColumnDef + ")")
+	// Extract just the column definition from the translated CREATE TABLE
+	colDefRe := regexp.MustCompile(`(?i)\(` + regexp.QuoteMeta(columnName) + `\s+(.+?)\)`)
+	if matches := colDefRe.FindStringSubmatch(newColumnDef); len(matches) > 1 {
+		newColumnDef = columnName + " " + matches[1]
+	}
+
+	fmt.Printf("[DEBUG] Reconstruct table %s: modify column %s to: %s\n", tableName, columnName, newColumnDef)
+
+	db := h.db.Pool.DB()
+
+	// Get current table schema
+	pragmaQuery := fmt.Sprintf("PRAGMA table_info('%s')", strings.ReplaceAll(tableName, "'", "''"))
+	rows, err := db.Query(pragmaQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get table info: %w", err)
+	}
+	defer rows.Close()
+
+	// Build column definitions
+	var columns []string
+	var columnNames []string
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return nil, fmt.Errorf("failed to scan table info: %w", err)
+		}
+
+		colDef := "`" + name + "` " + ctype
+		if name == columnName {
+			// Use the new column definition
+			colDef = "`" + newColumnDef + "`"
+		}
+		if notNull == 1 && name != columnName {
+			colDef += " NOT NULL"
+		}
+		if dfltValue.Valid && name != columnName {
+			colDef += " DEFAULT " + dfltValue.String
+		}
+		if pk == 1 {
+			colDef += " PRIMARY KEY"
+		}
+		columns = append(columns, colDef)
+		columnNames = append(columnNames, "`"+name+"`")
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading table info: %w", err)
+	}
+
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("table %s not found", tableName)
+	}
+
+	tmpTable := "_tmp_" + tableName
+
+	// Build reconstruction queries
+	createSQL := fmt.Sprintf("CREATE TABLE `%s` (%s)", tmpTable, strings.Join(columns, ", "))
+	copySQL := fmt.Sprintf("INSERT INTO `%s` SELECT %s FROM `%s`", tmpTable, strings.Join(columnNames, ","), tableName)
+	dropOldSQL := fmt.Sprintf("DROP TABLE `%s`", tableName)
+	renameSQL := fmt.Sprintf("ALTER TABLE `%s` RENAME TO `%s`", tmpTable, tableName)
+
+	// Execute reconstruction steps
+	if _, err := db.Exec(createSQL); err != nil {
+		return nil, fmt.Errorf("failed to create temp table: %w", err)
+	}
+	if _, err := db.Exec(copySQL); err != nil {
+		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tmpTable))
+		return nil, fmt.Errorf("failed to copy data: %w", err)
+	}
+	if _, err := db.Exec(dropOldSQL); err != nil {
+		return nil, fmt.Errorf("failed to drop old table: %w", err)
+	}
+	if _, err := db.Exec(renameSQL); err != nil {
+		return nil, fmt.Errorf("failed to rename table: %w", err)
+	}
+
+	fmt.Printf("[DEBUG] Table %s reconstructed successfully\n", tableName)
+	return &mysql.Result{}, nil
 }
 
 // isQueryStmt checks if an AST statement returns rows.
@@ -277,7 +379,7 @@ func (h *SessionHandler) HandleStmtPrepare(query string) (int, int, interface{},
 	paramCount := strings.Count(translated, "?")
 
 	columnCount := 0
-	stmts, _, _ := sqlParser.ParseSQL(query)
+	stmts, _, _ := safeParseSQL(query)
 	if len(stmts) > 0 && isQueryStmt(stmts[0]) {
 		rows, err := stmt.Query()
 		if err == nil {
@@ -297,7 +399,7 @@ func (h *SessionHandler) HandleStmtExecute(context interface{}, query string, ar
 		return nil, fmt.Errorf("invalid prepared statement context")
 	}
 
-	stmts, _, _ := sqlParser.ParseSQL(query)
+	stmts, _, _ := safeParseSQL(query)
 	if len(stmts) > 0 && isQueryStmt(stmts[0]) {
 		rows, err := stmt.Query(args...)
 		if err != nil {
@@ -551,9 +653,11 @@ func buildResultset(rows *sql.Rows) (*mysql.Resultset, error) {
 			break
 		}
 		dbType := strings.ToUpper(ct.DatabaseTypeName())
+		fmt.Printf("[DEBUG] Column %d (%s): dbType=%q\n", i, rs.Fields[i].Name, dbType)
 		switch {
 		case dbType == "DATETIME" || dbType == "TIMESTAMP":
 			rs.Fields[i].Type = mysql.MYSQL_TYPE_DATETIME
+			fmt.Printf("[DEBUG]   -> Set to MYSQL_TYPE_DATETIME\n")
 		case dbType == "DATE":
 			rs.Fields[i].Type = mysql.MYSQL_TYPE_DATE
 		case dbType == "TIME":

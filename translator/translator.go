@@ -1,6 +1,7 @@
 package translator
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -214,6 +215,11 @@ func (t *Translator) translateDDL(sql string) string {
 		return t.translateCreateIndex(sql)
 	}
 
+	// Handle ALTER TABLE
+	if strings.HasPrefix(upper, "ALTER TABLE") {
+		return t.translateAlterTable(sql)
+	}
+
 	return sql
 }
 
@@ -307,6 +313,43 @@ func (t *Translator) translateCreateIndex(sql string) string {
 	// Remove IF NOT EXISTS (SQLite supports it, but let's be safe)
 	// Remove USING BTREE/HASH (SQLite doesn't support)
 	sql = removeOption(sql, `USING\s+(BTREE|HASH)`)
+	return sql
+}
+
+// translateAlterTable converts MySQL ALTER TABLE to SQLite
+func (t *Translator) translateAlterTable(sql string) string {
+	upper := strings.ToUpper(sql)
+
+	// ALTER TABLE ... MODIFY COLUMN -> table reconstruction (SQLite doesn't support MODIFY COLUMN)
+	// Return marker for handler to process
+	modifyRe := regexp.MustCompile("(?i)^ALTER\\s+TABLE\\s+`?(\\w+)`?\\s+MODIFY\\s+COLUMN\\s+`?(\\w+)`?\\s+(.*)$")
+	if matches := modifyRe.FindStringSubmatch(sql); len(matches) > 0 {
+		tableName := matches[1]
+		columnDef := matches[3]
+		return fmt.Sprintf("-- RECONSTRUCT_TABLE: %s MODIFY %s %s", tableName, matches[2], columnDef)
+	}
+
+	// ALTER TABLE ... ADD COLUMN is supported in SQLite, pass through
+	if strings.Contains(upper, "ADD COLUMN") {
+		return sql
+	}
+
+	// ALTER TABLE ... DROP COLUMN is supported in SQLite 3.35.0+, pass through
+	if strings.Contains(upper, "DROP COLUMN") {
+		return sql
+	}
+
+	// ALTER TABLE ... RENAME TO is supported in SQLite, pass through
+	if strings.Contains(upper, "RENAME TO") {
+		return sql
+	}
+
+	// ALTER TABLE ... RENAME COLUMN is supported in SQLite, pass through
+	if strings.Contains(upper, "RENAME COLUMN") {
+		return sql
+	}
+
+	// Default: return as-is
 	return sql
 }
 
