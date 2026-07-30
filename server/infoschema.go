@@ -213,9 +213,9 @@ func (h *SessionHandler) queryInfoSchemaColumns(conditions map[string]string) (*
 		}
 		ordinalPos++
 
-		isNullable := "YES"
+		isNullable := 1
 		if notNull == 1 {
-			isNullable = "NO"
+			isNullable = 0
 		}
 
 		columnKey := ""

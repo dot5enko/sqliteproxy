@@ -503,6 +503,8 @@ func buildResultset(rows *sql.Rows) (*mysql.Resultset, error) {
 		return nil, err
 	}
 
+	colTypes, _ := rows.ColumnTypes()
+
 	var resultRows [][]interface{}
 
 	for rows.Next() {
@@ -539,7 +541,33 @@ func buildResultset(rows *sql.Rows) (*mysql.Resultset, error) {
 		return nil, err
 	}
 
-	return mysql.BuildSimpleResultset(columns, resultRows, false)
+	rs, err := mysql.BuildSimpleResultset(columns, resultRows, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, ct := range colTypes {
+		if i >= len(rs.Fields) {
+			break
+		}
+		dbType := strings.ToUpper(ct.DatabaseTypeName())
+		switch {
+		case dbType == "DATETIME" || dbType == "TIMESTAMP":
+			rs.Fields[i].Type = mysql.MYSQL_TYPE_DATETIME
+		case dbType == "DATE":
+			rs.Fields[i].Type = mysql.MYSQL_TYPE_DATE
+		case dbType == "TIME":
+			rs.Fields[i].Type = mysql.MYSQL_TYPE_TIME
+		case dbType == "JSON":
+			rs.Fields[i].Type = mysql.MYSQL_TYPE_JSON
+		case dbType == "BOOLEAN" || dbType == "BOOL":
+			rs.Fields[i].Type = mysql.MYSQL_TYPE_TINY
+		case dbType == "DECIMAL" || dbType == "NUMERIC":
+			rs.Fields[i].Type = mysql.MYSQL_TYPE_NEWDECIMAL
+		}
+	}
+
+	return rs, nil
 }
 
 // Ensure SessionHandler implements server.Handler.
